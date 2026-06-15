@@ -5,7 +5,7 @@ from discord.ext import commands, tasks
 
 # ==================== ВЕРТИКАЛЬНЫЙ БЛОК НАСТРОЕК ====================
 CONFIG = {
-    "dev_id": 123456789012345678,  # <-- ТВОЙ DISCORD ID
+    "dev_id": 421352414948622336,  # <-- ТВОЙ DISCORD ID (сюда придут логи синхронизации)
     "interval_hours": 6,           # Интервал автоматического обновления
     
     "sections": {
@@ -13,9 +13,9 @@ CONFIG = {
             "title": "📋 | Старший Состав",
             "color": 0xE74C3C,
             "roles": {
-                1516122208974536866: ["Генеральный Директор", False, []], 
-                1516122249529393263: ["Зам. Директора", True, []],         
-                1516122325270139031: ["Исполнительный Директор", True, []]
+                111111111111111111: ["Генеральный Директор", False, []], 
+                222222222222222222: ["Зам. Директора", True, []],         
+                333333333333333333: ["Исполнительный Директор", True, []]
             }
         },
         "jd": {
@@ -102,7 +102,6 @@ async def notify_dev(text: str):
 
 
 def generate_embeds(guild: discord.Guild, key: str) -> list[discord.Embed]:
-    """Генератор эмбедов с чистым футером без дублирования разделителей."""
     section = CONFIG["sections"][key]
     lines = []
     seen_members = set() 
@@ -117,14 +116,10 @@ def generate_embeds(guild: discord.Guild, key: str) -> list[discord.Embed]:
         valid_members = []
         
         for member in role.members:
-            # 1. Проверка черного списка ролей
             if blacklist_roles and any(member.get_role(b_id) for b_id in blacklist_roles):
                 continue
-            
-            # 2. Проверка на дубликаты выше по списку
             if filter_duplicates and member.id in seen_members:
                 continue
-                
             valid_members.append(member)
             seen_members.add(member.id)
 
@@ -146,7 +141,6 @@ def generate_embeds(guild: discord.Guild, key: str) -> list[discord.Embed]:
     total_staff = len(seen_members)
     embeds[0].title = section["title"]
     
-    # ИСПРАВЛЕНО: Убрали ручной разделитель в конце, теперь Discord добавит свой нативно
     embeds[-1].set_footer(
         text=f"{total_staff} сотрудников • Автообновление: каждые {CONFIG['interval_hours']} ч."
     )
@@ -177,37 +171,34 @@ async def run_global_sync() -> tuple[int, list[str]]:
     return success_count, errors
 
 
-@tasks.loop(hours=CONFIG["interval_hours"])
-async def auto_update():
-    _, errors = await run_global_sync()
-    if errors:
-        errors_text = "\n".join(errors)
-        await notify_dev(f"⚠️ **Ошибки при плановом автообновлении списков:**\n```python\n{errors_text}\n```")
-
-
 # ----------------- КОМАНДЫ ДЛЯ АДМИНИСТРАЦИИ -----------------
 
 @bot.command(name="sync")
 @commands.has_permissions(administrator=True)
 async def sync_all_lists(ctx):
-    await ctx.message.delete()
+    # ИСПРАВЛЕНО: Удаление сообщения пользователя убрано полностью
     
-    status_msg = await ctx.send("🔄 **Запущена глобальная синхронизация всех составов...**")
+    # ИСПРАВЛЕНО: Статус запуска отправляется сразу в ЛС создателю бота
+    await notify_dev(f"🔄 **Запущена ручная синхронизация всех составов с сервера `{ctx.guild.name}`...**")
+    
     success, errors = await run_global_sync()
     
+    # ИСПРАВЛЕНО: Результаты отправляются строго в ЛС разработчику
     result_text = f"✅ **Синхронизация успешно завершена!**\nОбновлено списков: `{success}` из `{len(CONFIG['sections'])}`."
     if errors:
-        result_text += f"\n⚠️ Обнаружено ошибок: `{len(errors)}`. Технические логи отправлены в ЛС разработчику."
+        result_text += f"\n⚠️ Обнаружено ошибок: `{len(errors)}`."
         errors_text = "\n".join(errors)
-        await notify_dev(f"💥 **Ошибки ручной синхронизации `!sync` от {ctx.author.mention}:**\n```python\n{errors_text}\n```")
-        
-    await status_msg.edit(content=result_text, delete_after=15)
+        await notify_dev(f"{result_text}\n```python\n{errors_text}\n
+```")
+    else:
+        await notify_dev(result_text)
 
 
 def make_command(name: str):
     @commands.has_permissions(administrator=True)
     async def cmd(ctx):
         try:
+            # ИСПРАВЛЕНО: Удаление сообщения пользователя убрано полностью
             msg = await ctx.send(embeds=generate_embeds(ctx.guild, name))
             save_ids(name, ctx.channel.id, msg.id)
             await notify_dev(f"✅ **Эмбед `!{name}` успешно создан в канале <#{ctx.channel.id}>!**")
@@ -217,9 +208,18 @@ def make_command(name: str):
 # --------------------------------------------------------------
 
 
+@tasks.loop(hours=CONFIG["interval_hours"])
+async def auto_update():
+    _, errors = await run_global_sync()
+    if errors:
+        errors_text = "\n".join(errors)
+        await notify_dev(f"⚠️ **Ошибки при плановом автообновлении списков:**\n```python\n{errors_text}\n
+```")
+
+
 @bot.event
 async def on_ready():
-    print(f'Бот {bot.user.name} успешно запущен. Проблема с футером устранена!')
+    print(f'Бот {bot.user.name} успешно запущен. Логи перенесены в ЛС!')
     if not auto_update.is_running():
         auto_update.start()
 
