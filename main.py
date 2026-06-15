@@ -5,7 +5,7 @@ from discord.ext import commands, tasks
 
 # ==================== ВЕРТИКАЛЬНЫЙ БЛОК НАСТРОЕК ====================
 CONFIG = {
-    "dev_id": 421352414948622336,  # <-- ТВОЙ DISCORD ID
+    "dev_id": 123456789012345678,  # <-- ТВОЙ DISCORD ID
     "interval_hours": 6,           # Интервал автоматического обновления
     
     "sections": {
@@ -14,8 +14,8 @@ CONFIG = {
             "color": 0xE74C3C,
             "roles": {
                 1516122208974536866: ["Генеральный Директор", False, []], 
-                1516122249529393263: ["Зам. Директора", False, []],         
-                1516122325270139031: ["Исполнительный Директор", False, []]
+                1516122249529393263: ["Зам. Директора", True, []],         
+                333333333333333333: ["Исполнительный Директор", True, []]
             }
         },
         "jd": {
@@ -102,7 +102,7 @@ async def notify_dev(text: str):
 
 
 def generate_embeds(guild: discord.Guild, key: str) -> list[discord.Embed]:
-    """Генератор эмбедов с чистым текстовым футером (без эмодзи)."""
+    """Генератор эмбедов с чистым футером без дублирования разделителей."""
     section = CONFIG["sections"][key]
     lines = []
     seen_members = set() 
@@ -146,9 +146,9 @@ def generate_embeds(guild: discord.Guild, key: str) -> list[discord.Embed]:
     total_staff = len(seen_members)
     embeds[0].title = section["title"]
     
-    # Иконка людей убрана, остался только строгий текст
+    # ИСПРАВЛЕНО: Убрали ручной разделитель в конце, теперь Discord добавит свой нативно
     embeds[-1].set_footer(
-        text=f"{total_staff} сотрудников • Автообновление: каждые {CONFIG['interval_hours']} ч. • Последнее обновление |"
+        text=f"{total_staff} сотрудников • Автообновление: каждые {CONFIG['interval_hours']} ч."
     )
     embeds[-1].timestamp = discord.utils.utcnow()
     return embeds
@@ -219,7 +219,7 @@ def make_command(name: str):
 
 @bot.event
 async def on_ready():
-    print(f'Бот {bot.user.name} успешно запущен. Строгий стиль футера применен!')
+    print(f'Бот {bot.user.name} успешно запущен. Проблема с футером устранена!')
     if not auto_update.is_running():
         auto_update.start()
 
