@@ -47,16 +47,25 @@ async def get_shift_interface(shift_type: str, guild: discord.Guild):
         )
         occupied_slots = {row[0]: row[1] for row in await cursor.fetchall()}
 
-    embed = discord.Embed(
-        title=f"📅 Расписание смен — Отдел {shift_type.upper()}",
-        color=0x3498DB if shift_type != "24ad" else 0xF1C40F
-    )
+    # ИЗМЕНЕНИЕ: Динамические заголовки с датой дд.мм
+    current_date_str = date.today().strftime("%d.%m")
+    if shift_type == "24ad":
+        title_text = f"📆 Расписание смен — {current_date_str}"
+        color_val = 0xF1C40F
+    elif shift_type == "ad":
+        title_text = f"📆 Расписание дежурств — {current_date_str}"
+        color_val = 0x3498DB
+    else:
+        title_text = f"📅 Расписание смен — Отдел {shift_type.upper()}"
+        color_val = 0x3498DB
+
+    embed = discord.Embed(title=title_text, color=color_val)
     
-    # ИЗМЕНЕНИЕ: Новый формат вывода строк расписания
+    # ИЗМЕНЕНИЕ: Замена красного кружка на красный крестик ❌
     description_lines = []
     for slot in slots:
         if slot in occupied_slots:
-            description_lines.append(f"🔴 `{slot}` — <@{occupied_slots[slot]}>")
+            description_lines.append(f"❌ `{slot}` — <@{occupied_slots[slot]}>")
         else:
             description_lines.append(f"⚪️ `{slot}` — 🟢 *Свободно*")
             
@@ -153,14 +162,14 @@ class ShiftButton(discord.ui.Button):
         await process_booking(interaction, self.shift_type, self.slot_time)
 
 
-# ==================== МОДАЛКА КУРАТОРА ====================
-class CuratorRemoveModal(discord.ui.Modal, title="Принудительное снятие"):
-    slot_input = discord.ui.TextInput(
-        label="Укажите время смены точь-в-точь",
-        placeholder="Например: 14:00 - 14:59 или 15:00",
+# ==================== НОВАЯ МОДАЛКА КУРАТОРА: СНЯТЬ ПО ID ====================
+class CuratorRemoveByIdModal(discord.ui.Modal, title="Принудительное снятие"):
+    user_input = discord.ui.TextInput(
+        label="ID сотрудника",
+        placeholder="Введи Discord ID цифрами...",
         required=True,
-        min_length=5,
-        max_length=20
+        min_length=15,
+        max_length=21
     )
 
     def __init__(self, shift_type, parent_message):
@@ -169,65 +178,117 @@ class CuratorRemoveModal(discord.ui.Modal, title="Принудительное �
         self.parent_message = parent_message
 
     async def on_submit(self, interaction: discord.Interaction):
-        raw_slot = self.slot_input.value.strip()
+        raw_id = self.user_input.value.strip()
+        if not raw_id.isdigit():
+            return await interaction.response.send_message("❌ Неверный формат ID. Используйте только цифры.", ephemeral=True)
+        
+        target_id = int(raw_id)
         today = str(date.today())
-        slots = CONFIG[self.shift_type]["slots"]
-
-        target_slot = None
-        for s in slots:
-            if raw_slot in s:
-                target_slot = s
-                break
-
-        if not target_slot:
-            return await interaction.response.send_message("❌ Слот с таким временем не найден в сетке этого отдела.", ephemeral=True)
 
         async with aiosqlite.connect(DB_NAME) as db:
             cursor = await db.execute(
-                "SELECT user_id FROM shifts WHERE date = ? AND department = ? AND slot = ?",
-                (today, self.shift_type, target_slot)
+                "SELECT slot FROM shifts WHERE date = ? AND department = ? AND user_id = ?",
+                (today, self.shift_type, target_id)
             )
             row = await cursor.fetchone()
             
+            # ИЗМЕНЕНИЕ: Если у сотрудника нет смены — точное эфемерное сообщение
             if not row:
-                return await interaction.response.send_message(f"❌ Слот **{target_slot}** не занят.", ephemeral=True)
+                return await interaction.response.send_message("❌ У данного сотрудника нет смены.", ephemeral=True)
 
-            old_user_id = row[0]
+            user_slot = row[0]
             await db.execute(
-                "DELETE FROM shifts WHERE date = ? AND department = ? AND slot = ?",
-                (today, self.shift_type, target_slot)
+                "DELETE FROM shifts WHERE date = ? AND department = ? AND user_id = ?",
+                (today, self.shift_type, target_id)
             )
             await db.commit()
 
         embed, view = await get_shift_interface(self.shift_type, interaction.guild)
         await self.parent_message.edit(embed=embed, view=view)
-        await interaction.response.send_message(f"✅ Сотрудник <@{old_user_id}> снят со смены **{target_slot}**.", ephemeral=True)
+        await interaction.response.send_message(f"✅ Сотрудник <@{target_id}> принудительно снят со смены `{user_slot}`.", ephemeral=True)
 
 
-# ==================== СКРЫТОЕ МЕНЮ КУРАТОРА ====================
+# ==================== НОВАЯ МОДАЛКА КУРАТОРА: ПЕРЕДАТЬ С ДВУМЯ ПОЛЯМИ ====================
+class CuratorTransferModal(discord.ui.Modal, title="Кураторская передача смены"):
+    from_input = discord.ui.TextInput(
+        label="ID сотрудника, у кого снять смену", 
+        placeholder="Discord ID цифрами...", 
+        required=True, min_length=15, max_length=21
+    )
+    to_input = discord.ui.TextInput(
+        label="ID сотрудника, кому придет смена", 
+        placeholder="Discord ID цифрами...", 
+        required=True, min_length=15, max_length=21
+    )
+
+    def __init__(self, shift_type, parent_message):
+        super().__init__()
+        self.shift_type = shift_type
+        self.parent_message = parent_message
+
+    async def on_submit(self, interaction: discord.Interaction):
+        from_raw = self.from_input.value.strip()
+        to_raw = self.to_input.value.strip()
+
+        if not from_raw.isdigit() or not to_raw.isdigit():
+            return await interaction.response.send_message("❌ Неверный формат ID. Поля должны содержать только цифры.", ephemeral=True)
+        
+        from_id = int(from_raw)
+        to_id = int(to_raw)
+        today = str(date.today())
+
+        target_member = interaction.guild.get_member(to_id)
+        if not target_member:
+            return await interaction.response.send_message("❌ Новый сотрудник не найден на этом сервере.", ephemeral=True)
+
+        required_role = CONFIG[self.shift_type]["role_id"]
+        if not discord.utils.get(target_member.roles, id=required_role):
+            return await interaction.response.send_message("❌ У нового сотрудника нет роли этого отдела.", ephemeral=True)
+
+        async with aiosqlite.connect(DB_NAME) as db:
+            # Ищем смену первого сотрудника
+            cursor = await db.execute("SELECT slot FROM shifts WHERE date = ? AND department = ? AND user_id = ?", (today, self.shift_type, from_id))
+            row = await cursor.fetchone()
+            if not row:
+                return await interaction.response.send_message("❌ У сотрудника, от которого передают, нет активной смены.", ephemeral=True)
+            
+            slot_to_transfer = row[0]
+
+            # Проверяем, нет ли уже смены у второго сотрудника
+            cursor = await db.execute("SELECT 1 FROM shifts WHERE date = ? AND department = ? AND user_id = ?", (today, self.shift_type, to_id))
+            if await cursor.fetchone():
+                return await interaction.response.send_message("❌ У получателя смены уже есть активная смена на сегодня.", ephemeral=True)
+
+            # Делаем трансфер
+            await db.execute(
+                "UPDATE shifts SET user_id = ? WHERE date = ? AND department = ? AND user_id = ?",
+                (to_id, today, self.shift_type, from_id)
+            )
+            await db.commit()
+
+        embed, view = await get_shift_interface(self.shift_type, interaction.guild)
+        await self.parent_message.edit(embed=embed, view=view)
+        await interaction.response.send_message(f"✅ Смена `{slot_to_transfer}` успешно передана от <@{from_id}> к <@{to_id}>.", ephemeral=True)
+
+
+# ==================== ОБНОВЛЕННОЕ СКРЫТОЕ МЕНЮ КУРАТОРА ====================
 class CuratorActionView(discord.ui.View):
     def __init__(self, shift_type: str, parent_message: discord.Message):
         super().__init__(timeout=60)
         self.shift_type = shift_type
         self.parent_message = parent_message
 
-    @discord.ui.button(label="🧹 Сбросить все смены", style=discord.ButtonStyle.danger)
-    async def reset_all(self, interaction: discord.Interaction, button: discord.ui.Button):
-        today = str(date.today())
-        async with aiosqlite.connect(DB_NAME) as db:
-            await db.execute("DELETE FROM shifts WHERE date = ? AND department = ?", (today, self.shift_type))
-            await db.commit()
-
-        embed, view = await get_shift_interface(self.shift_type, interaction.guild)
-        await self.parent_message.edit(embed=embed, view=view)
-        await interaction.response.send_message("🧹 Расписание отдела очищено!", ephemeral=True)
-
-    @discord.ui.button(label="🚫 Снять сотрудника", style=discord.ButtonStyle.secondary)
+    # Осталось всего две кнопки. Кнопка сброса полностью удалена.
+    @discord.ui.button(label="🚫 Снять сотрудника", style=discord.ButtonStyle.danger)
     async def remove_someone(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_modal(CuratorRemoveModal(self.shift_type, self.parent_message))
+        await interaction.response.send_modal(CuratorRemoveByIdModal(self.shift_type, self.parent_message))
+
+    @discord.ui.button(label="🔄 Передать смену", style=discord.ButtonStyle.primary)
+    async def transfer_shift_curator(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(CuratorTransferModal(self.shift_type, self.parent_message))
 
 
-# ==================== МОДАЛКА ПЕРЕДАЧИ ====================
+# ==================== МОДАЛКА ПЕРЕДАЧИ (ДЛЯ ОБЫЧНЫХ СОТРУДНИКОВ) ====================
 class TransferModal(discord.ui.Modal, title="Передача смены"):
     target_input = discord.ui.TextInput(label="ID нового сотрудника", placeholder="Discord ID цифрами...", required=True, min_length=15, max_length=21)
 
@@ -288,7 +349,7 @@ class ShiftView(discord.ui.View):
                     if slot not in occupied:
                         self.add_item(ShiftButton(slot, self.shift_type))
 
-        # Кнопки управления
+        # Кнопки управления под расписанием
         self.add_item(discord.ui.Button(style=discord.ButtonStyle.red, label="Отменить смену", custom_id=f"p_ctrl_cancel_{shift_type}", row=row_idx))
         self.add_item(discord.ui.Button(style=discord.ButtonStyle.blurple, label="Передать смену", custom_id=f"p_ctrl_transfer_{shift_type}", row=row_idx))
         self.add_item(discord.ui.Button(style=discord.ButtonStyle.secondary, label="⚙️ Панель куратора", custom_id=f"p_ctrl_curator_{shift_type}", row=row_idx))
