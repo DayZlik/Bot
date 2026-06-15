@@ -176,20 +176,17 @@ async def run_global_sync() -> tuple[int, list[str]]:
 @bot.command(name="sync")
 @commands.has_permissions(administrator=True)
 async def sync_all_lists(ctx):
-    # ИСПРАВЛЕНО: Удаление сообщения пользователя убрано полностью
-    
-    # ИСПРАВЛЕНО: Статус запуска отправляется сразу в ЛС создателю бота
+    # Оповещение о начале процесса отправляется разработчику в ЛС
     await notify_dev(f"🔄 **Запущена ручная синхронизация всех составов с сервера `{ctx.guild.name}`...**")
     
     success, errors = await run_global_sync()
     
-    # ИСПРАВЛЕНО: Результаты отправляются строго в ЛС разработчику
     result_text = f"✅ **Синхронизация успешно завершена!**\nОбновлено списков: `{success}` из `{len(CONFIG['sections'])}`."
     if errors:
         result_text += f"\n⚠️ Обнаружено ошибок: `{len(errors)}`."
         errors_text = "\n".join(errors)
-        await notify_dev(f"{result_text}\n```python\n{errors_text}\n
-```")
+        # ИСПРАВЛЕНО: Закрывающие кавычки f-строки и блока кода расставлены верно
+        await notify_dev(f"{result_text}\n```python\n{errors_text}\n```")
     else:
         await notify_dev(result_text)
 
@@ -198,7 +195,6 @@ def make_command(name: str):
     @commands.has_permissions(administrator=True)
     async def cmd(ctx):
         try:
-            # ИСПРАВЛЕНО: Удаление сообщения пользователя убрано полностью
             msg = await ctx.send(embeds=generate_embeds(ctx.guild, name))
             save_ids(name, ctx.channel.id, msg.id)
             await notify_dev(f"✅ **Эмбед `!{name}` успешно создан в канале <#{ctx.channel.id}>!**")
@@ -213,13 +209,12 @@ async def auto_update():
     _, errors = await run_global_sync()
     if errors:
         errors_text = "\n".join(errors)
-        await notify_dev(f"⚠️ **Ошибки при плановом автообновлении списков:**\n```python\n{errors_text}\n
-```")
+        await notify_dev(f"⚠️ **Ошибки при плановом автообновлении списков:**\n```python\n{errors_text}\n```")
 
 
 @bot.event
 async def on_ready():
-    print(f'Бот {bot.user.name} успешно запущен. Логи перенесены в ЛС!')
+    print(f'Бот {bot.user.name} успешно запущен и готов к работе!')
     if not auto_update.is_running():
         auto_update.start()
 
