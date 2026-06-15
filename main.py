@@ -2,8 +2,8 @@ import os
 import discord
 from discord.ext import commands
 
-# Настройка намерений (Intents) — они обязательны в новых версиях discord.py
-intents = discord.get_default_intents()
+# ИСПРАВЛЕНО: Правильный способ получения стандартных намерений
+intents = discord.Intents.default()
 intents.message_content = True  # Разрешаем боту читать текст сообщений
 
 # Создаем экземпляр бота с префиксом команды '!'
@@ -19,9 +19,8 @@ async def on_ready():
 async def hello(ctx):
     await ctx.send(f'Привет, {ctx.author.name}! Тест хостинга прошел успешно! 👋')
 
-# Запуск бота с использованием переменной окружения (для безопасности)
+# Запуск бота с использованием переменной окружения
 if __name__ == "__main__":
-    # Хостинги обычно требуют брать токен из переменных окружения
     token = os.getenv('DISCORD_TOKEN')
     if token:
         bot.run(token)
