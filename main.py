@@ -1,136 +1,238 @@
 import os
+import json
 import discord
-from discord.ext import commands, tasks  # Подключили модуль задач по таймеру
+from discord.ext import commands, tasks
 
-# ==================== БЛОК НАСТРОЕК (КОНФИГУРАЦИЯ) ====================
-BOT_CONFIG = {
-    "prefix": "!",  # Командный префикс бота
+# ==================== ВЕРТИКАЛЬНЫЙ БЛОК НАСТРОЕК ====================
+CONFIG = {
+    "dev_id": 421352414948622336,  # <-- ТВОЙ DISCORD ID
+    "interval_hours": 6,           # Интервал автоматического обновления
     
-    # --- НАСТРОЙКИ АВТО-ОБНОВЛЕНИЯ ---
-    "update_interval_hours": 6,  # Как часто обновлять состав (в часах)
-    
-    # Сюда нужно будет вставить ID ПОСЛЕ того, как вызовешь команду !создать_состав
-    "target_channel_id": 0,      # Замени на ID канала, когда получишь его от бота
-    "target_message_id": 0,      # Замени на ID сообщения, когда получишь его от бота
-    # ---------------------------------
-
-    "embed": {
-        "title": "📋 | Старший Состав",
-        "color": 0xE74C3C,  # Красный цвет полоски
-        "empty_text": "— Нет участников —",
-        "bullet": "•"
-    },
-    
-    "roles": [
-        {"id": 1516122208974536866, "name_override": "Генеральный Директор"},
-        {"id": 1516122249529393263, "name_override": "Зам. Директора"},
-        {"id": 1516122280780890172, "name_override": "Главный Редактор"},
-        {"id": 1516122325270139031, "name_override": "Зам. Главного Редактора"},
-        {"id": 1516122352373731339, "name_override": "Ассистенты Директора"},
-        {"id": 1516122857145634968, "name_override": "Куратор JD"}
-    ]
+    "sections": {
+        "старший_состав": {
+            "title": "📋 | Старший Состав",
+            "color": 0xE74C3C,
+            "roles": {
+                1516122208974536866: ["Генеральный Директор", False, []], 
+                1516122249529393263: ["Зам. Директора", False, []],         
+                1516122325270139031: ["Исполнительный Директор", False, []]
+            }
+        },
+        "jd": {
+            "title": "💼 | Подразделение JD",
+            "color": 0x3498DB,
+            "roles": {
+                444444444444444444: ["Куратор JD", False, []],
+                555555555555555555: ["Сотрудник JD", True, [7777777777]] 
+            }
+        },
+        "rm": {
+            "title": "🚗 | Подразделение RM",
+            "color": 0x2ECC71,
+            "roles": {
+                666666666666666666: ["Глава RM", False, []],
+                777777777777777777: ["Зам. Главы RM", True, []]
+            }
+        },
+        "ad": {
+            "title": "📢 | Подразделение AD",
+            "color": 0xF1C40F,
+            "roles": {
+                888888888888888888: ["Глава AD", False, []]
+            }
+        },
+        "ed": {
+            "title": "🎓 | Подразделение ED",
+            "color": 0x9B59B6,
+            "roles": {
+                999999999999999999: ["Глава ED", False, []]
+            }
+        },
+        "bm": {
+            "title": "📊 | Подразделение BM",
+            "color": 0x34495E,
+            "roles": {
+                101010101010101010: ["Глава BM", False, []]
+            }
+        },
+        "контракты": {
+            "title": "📜 | Действующие Контракты",
+            "color": 0xE67E22,
+            "roles": {
+                202020202020202020: ["Contr. press", False, []],
+                303030303030303030: ["Contr. blogs", False, []]
+            }
+        }
+    }
 }
-# ======================================================================
+DATA_FILE = "bot_state.json"
+# ==============================================================================
 
-intents = discord.Intents.default()
-intents.message_content = True
-intents.members = True
+bot = commands.Bot(command_prefix="!", intents=discord.Intents.all())
 
-bot = commands.Bot(command_prefix=BOT_CONFIG["prefix"], intents=intents)
+# ----------------- РАБОТА С БАЗОЙ ДАННЫХ (JSON) -----------------
+def load_saved_ids() -> dict:
+    if os.path.exists(DATA_FILE):
+        try:
+            with open(DATA_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception as e:
+            print(f"Ошибка чтения файла БД: {e}")
+    return {}
+
+def save_ids(section_key: str, channel_id: int, message_id: int):
+    data = load_saved_ids()
+    data[section_key] = {"channel_id": channel_id, "message_id": message_id}
+    try:
+        with open(DATA_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=4, ensure_ascii=False)
+    except Exception as e:
+        print(f"Ошибка записи в файл БД: {e}")
+# ------------------------------------------------------------------
+
+async def notify_dev(text: str):
+    if CONFIG["dev_id"] in (0, 123456789012345678):
+        return print(f"[Лог]: {text}")
+    try:
+        user = bot.get_user(CONFIG["dev_id"]) or await bot.fetch_user(CONFIG["dev_id"])
+        if user:
+            await user.send(text)
+    except Exception as e:
+        print(f"Ошибка отправки в ЛС: {e}")
 
 
-def generate_staff_embed(guild: discord.Guild) -> discord.Embed:
-    """Функция сборки эмбеда (осталась прежней)"""
-    embed_settings = BOT_CONFIG["embed"]
-    embed = discord.Embed(title=embed_settings["title"], color=discord.Color(embed_settings["color"]))
-    description_lines = []
+def generate_embeds(guild: discord.Guild, key: str) -> list[discord.Embed]:
+    """Генератор эмбедов с чистым текстовым футером (без эмодзи)."""
+    section = CONFIG["sections"][key]
+    lines = []
+    seen_members = set() 
     
-    for role_info in BOT_CONFIG["roles"]:
-        role = guild.get_role(role_info["id"])
+    for r_id, role_info in section["roles"].items():
+        role = guild.get_role(r_id)
         if not role:
-            print(f"Предупреждение: Роль с ID {role_info['id']} не найдена.")
+            bot.loop.create_task(notify_dev(f"⚠️ **Роль не найдена:** ID `{r_id}` в секции `{key}`."))
             continue
             
-        role_name = role_info["name_override"] if role_info["name_override"] else role.name
-        description_lines.append(f"**{role_name}**")
+        custom_name, filter_duplicates, blacklist_roles = role_info
+        valid_members = []
         
-        if role.members:
-            for member in role.members:
-                description_lines.append(f"{embed_settings['bullet']} {member.mention}")
-        else:
-            description_lines.append(embed_settings["empty_text"])
+        for member in role.members:
+            # 1. Проверка черного списка ролей
+            if blacklist_roles and any(member.get_role(b_id) for b_id in blacklist_roles):
+                continue
             
-        description_lines.append("")
+            # 2. Проверка на дубликаты выше по списку
+            if filter_duplicates and member.id in seen_members:
+                continue
+                
+            valid_members.append(member)
+            seen_members.add(member.id)
+
+        lines.append(f"**{custom_name or role.name}**")
+        lines.extend([f"• {m.mention}" for m in valid_members] if valid_members else ["— Нет участников —"])
+        lines.append("")
+
+    embeds, current_text = [], ""
+    for line in lines:
+        if len(current_text) + len(line) + 1 > 4000:
+            embeds.append(discord.Embed(color=section["color"], description=current_text))
+            current_text = line
+        else:
+            current_text = f"{current_text}\n{line}" if current_text else line
+            
+    if current_text:
+        embeds.append(discord.Embed(color=section["color"], description=current_text))
         
-    embed.description = "\n".join(description_lines)
-    return embed
-
-
-# ==================== АВТО-ОБНОВЛЕНИЕ ПО ТАЙМЕРУ ====================
-@tasks.loop(hours=BOT_CONFIG["update_interval_hours"])
-async def auto_update_staff():
-    channel_id = BOT_CONFIG["target_channel_id"]
-    message_id = BOT_CONFIG["target_message_id"]
+    total_staff = len(seen_members)
+    embeds[0].title = section["title"]
     
-    # Если ID еще не настроены, просто ничего не делаем
-    if channel_id == 0 or message_id == 0:
-        return
+    # Иконка людей убрана, остался только строгий текст
+    embeds[-1].set_footer(
+        text=f"{total_staff} сотрудников • Автообновление: каждые {CONFIG['interval_hours']} ч. • Последнее обновление |"
+    )
+    embeds[-1].timestamp = discord.utils.utcnow()
+    return embeds
+
+
+async def run_global_sync() -> tuple[int, list[str]]:
+    saved_data = load_saved_ids()
+    success_count = 0
+    errors = []
+    
+    for name in CONFIG["sections"].keys():
+        if name not in saved_data:
+            continue
+            
+        ch_id = saved_data[name].get("channel_id")
+        msg_id = saved_data[name].get("message_id")
         
-    print("[Лог] Начинаю автоматическое обновление состава...")
-    try:
-        # Находим канал (сначала в кэше, если нет — запрашиваем у Discord)
-        channel = bot.get_channel(channel_id) or await bot.fetch_channel(channel_id)
-        # Находим то самое сообщение, которое нужно отредактировать
-        message = await channel.fetch_message(message_id)
+        try:
+            ch = bot.get_channel(ch_id) or await bot.fetch_channel(ch_id)
+            msg = await ch.fetch_message(msg_id)
+            await msg.edit(embeds=generate_embeds(ch.guild, name))
+            success_count += 1
+        except Exception as e:
+            errors.append(f"Ошибка в секции `!{name}` (ID сообщения: `{msg_id}`): {e}")
+            
+    return success_count, errors
+
+
+@tasks.loop(hours=CONFIG["interval_hours"])
+async def auto_update():
+    _, errors = await run_global_sync()
+    if errors:
+        errors_text = "\n".join(errors)
+        await notify_dev(f"⚠️ **Ошибки при плановом автообновлении списков:**\n```python\n{errors_text}\n```")
+
+
+# ----------------- КОМАНДЫ ДЛЯ АДМИНИСТРАЦИИ -----------------
+
+@bot.command(name="sync")
+@commands.has_permissions(administrator=True)
+async def sync_all_lists(ctx):
+    await ctx.message.delete()
+    
+    status_msg = await ctx.send("🔄 **Запущена глобальная синхронизация всех составов...**")
+    success, errors = await run_global_sync()
+    
+    result_text = f"✅ **Синхронизация успешно завершена!**\nОбновлено списков: `{success}` из `{len(CONFIG['sections'])}`."
+    if errors:
+        result_text += f"\n⚠️ Обнаружено ошибок: `{len(errors)}`. Технические логи отправлены в ЛС разработчику."
+        errors_text = "\n".join(errors)
+        await notify_dev(f"💥 **Ошибки ручной синхронизации `!sync` от {ctx.author.mention}:**\n```python\n{errors_text}\n```")
         
-        # Генерируем новый актуальный эмбед
-        new_embed = generate_staff_embed(channel.guild)
-        
-        # Редактируем старое сообщение, заменяя эмбед на новый
-        await message.edit(embed=new_embed)
-        print("[Лог] Состав успешно обновлен по таймеру!")
-    except Exception as e:
-        print(f"[Ошибка] Не удалось автоматически обновить состав: {e}")
+    await status_msg.edit(content=result_text, delete_after=15)
+
+
+def make_command(name: str):
+    @commands.has_permissions(administrator=True)
+    async def cmd(ctx):
+        try:
+            msg = await ctx.send(embeds=generate_embeds(ctx.guild, name))
+            save_ids(name, ctx.channel.id, msg.id)
+            await notify_dev(f"✅ **Эмбед `!{name}` успешно создан в канале <#{ctx.channel.id}>!**")
+        except Exception as e:
+            await notify_dev(f"💥 **Ошибка выполнения команды `!{name}`:**\n```python\n{e}\n```")
+    return commands.Command(cmd, name=name)
+# --------------------------------------------------------------
 
 
 @bot.event
 async def on_ready():
-    print(f'Бот {bot.user.name} запущен!')
-    
-    # Запускаем цикл авто-обновления, если он еще не запущен
-    if not auto_update_staff.is_running():
-        auto_update_staff.start()
-        print(f"Цикл авто-обновления запущен! Интервал: {BOT_CONFIG['update_interval_hours']} ч.")
-# ======================================================================
+    print(f'Бот {bot.user.name} успешно запущен. Строгий стиль футера применен!')
+    if not auto_update.is_running():
+        auto_update.start()
 
+for cmd_name in CONFIG["sections"].keys():
+    bot.add_command(make_command(cmd_name))
 
-@bot.command(name="создать_состав")
-@commands.has_permissions(administrator=True)
-async def create_staff_msg(ctx):
-    """Команда для ПЕРВОЙ отправки сообщения. Бот выдаст ID, которые нужно сохранить."""
-    try:
-        # Создаем и отправляем эмбед
-        embed = generate_staff_embed(ctx.guild)
-        sent_message = await ctx.send(embed=embed)
-        
-        # Выводим подсказку для администратора
-        setup_info = (
-            "✅ **Сообщение с составом успешно создано!**\n\n"
-            "Чтобы включить авто-обновление, скопируй эти данные и вставь в `BOT_CONFIG` вашего кода:\n"
-            f'`"target_channel_id": {ctx.channel.id},`\n'
-            f'`"target_message_id": {sent_message.id},`\n\n'
-            "После изменения кода на хостинге, обязательно перезапусти бота!"
-        )
-        # Отправляем это сообщение автору команды в ЛС или прямо в чат (тут отправка в чат)
-        await ctx.send(setup_info, delete_after=60) # Удалится через минуту, чтобы не засорять чат
-        
-    except Exception as e:
-        await ctx.send(f"❌ Ошибка: {e}")
-
+@bot.event
+async def on_command_error(ctx, error):
+    if isinstance(error, commands.CommandNotFound): return
+    if isinstance(error, commands.MissingPermissions):
+        await notify_dev(f"🔒 **Попытка доступа!**\nЮзер: {ctx.author.mention}\nКоманда: `{ctx.message.content}`")
+        return
+    await notify_dev(f"💥 **Ошибка команды `{ctx.command}`:**\n```python\n{error}\n```")
 
 if __name__ == "__main__":
-    token = os.getenv('DISCORD_TOKEN')
-    if token:
-        bot.run(token)
-    else:
-        print("Ошибка: Переменная окружения 'DISCORD_TOKEN' не найдена!")
+    bot.run(os.getenv('DISCORD_TOKEN'))
