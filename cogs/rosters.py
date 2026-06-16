@@ -12,9 +12,9 @@ CONFIG = {
     "sections": {
         "старший_состав": {
             "title": "Состав",
-            "color": 0xE74C3C,
+            "color": 0xA23EFF,
             "roles": {
-                1446489339126218853: ["Ownwr", False, []], 
+                1446489339126218853: ["Owner", False, []], 
                 1430913711979233312: ["Dep. Owner", False, []],         
                 1430913754463207560: ["Winchester", True, []]
             }
