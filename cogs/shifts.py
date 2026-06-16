@@ -35,13 +35,16 @@ CONFIG = {
 DB_NAME = "shifts.db"                         
 # ============================================================
 
+def get_moscow_now() -> datetime:
+    """Возвращает текущую дату и время по МСК (UTC+3)"""
+    return datetime.now(timezone(timedelta(hours=3)))
+
 def get_moscow_date() -> date:
     """Гарантированно возвращает текущую дату по МСК (UTC+3)"""
-    return datetime.now(timezone(timedelta(hours=3))).date()
+    return get_moscow_now().date()
 
 
 async def get_shift_interface(shift_type: str, guild: discord.Guild, target_date=None):
-    """Генерирует Embed и View на основе состояния БД и переданной даты"""
     if target_date is None:
         target_date = get_moscow_date()
         
@@ -101,7 +104,7 @@ async def fetch_date_by_msg(message_id: int) -> str:
         return row[0] if row else str(get_moscow_date())
 
 
-# ==================== ОБЩАЯ ФУНКЦИЯ КЛИКА/ВЫБОРА СМЕНЫ ====================
+# ==================== ОБЩАЯ ФУНКЦИЯ БРОНИРОВАНИЯ СМЕНЫ ====================
 async def process_booking(interaction: discord.Interaction, shift_type: str, slot_time: str, target_date_str: str):
     t_date = datetime.strptime(target_date_str, "%Y-%m-%d").date()
 
@@ -112,14 +115,38 @@ async def process_booking(interaction: discord.Interaction, shift_type: str, slo
     if not discord.utils.get(interaction.user.roles, id=required_role):
         return await interaction.response.send_message("❌ У вас нет нужной роли для работы в этом отделе.", ephemeral=True)
 
+    now_msk_str = get_moscow_now().strftime("%Y-%m-%d %H:%M:%S")
+
     async with aiosqlite.connect(DB_NAME) as db:
+        # Проверяем, сколько смен пользователь УЖЕ взял на этот день
         cursor = await db.execute(
-            "SELECT 1 FROM shifts WHERE date = ? AND department = ? AND user_id = ?",
+            "SELECT created_at FROM shifts WHERE date = ? AND department = ? AND user_id = ?",
             (target_date_str, shift_type, interaction.user.id)
         )
-        if await cursor.fetchone():
-            return await interaction.response.send_message("❌ Вы уже заняли одну смену на этот день в этом отделе!", ephemeral=True)
+        user_shifts = await cursor.fetchall()
+        
+        # ИЗМЕНЕНИЕ: Умные лимиты и кулдаун для отдела 'ad'
+        if shift_type == "ad":
+            if len(user_shifts) >= 2:
+                return await interaction.response.send_message("❌ В отделе `ad` можно брать максимум 2 смены в день!", ephemeral=True)
+            elif len(user_shifts) == 1:
+                # Если уже есть 1 смена, проверяем кулдаун в 4 часа (240 минут)
+                first_shift_time = datetime.strptime(user_shifts[0][0], "%Y-%m-%d %H:%M:%S")
+                time_passed = get_moscow_now().replace(tzinfo=None) - first_shift_time
+                
+                if time_passed < timedelta(hours=4):
+                    remaining = timedelta(hours=4) - time_passed
+                    minutes_left = int(remaining.total_seconds() // 60)
+                    return await interaction.response.send_message(
+                        f"⏳ Вы сможете взять вторую смену в `ad` только через **{minutes_left} мин.** (ограничение 4 часа между бронированиями).", 
+                        ephemeral=True
+                    )
+        else:
+            # Для остальных отделов (bm, 24ad) железно оставляем только 1 смену
+            if len(user_shifts) >= 1:
+                return await interaction.response.send_message("❌ Вы уже заняли одну смену на этот день в этом отделе!", ephemeral=True)
 
+        # Проверяем, не занял ли слот кто-то другой параллельно
         cursor = await db.execute(
             "SELECT 1 FROM shifts WHERE date = ? AND department = ? AND slot = ?",
             (target_date_str, shift_type, slot_time)
@@ -127,9 +154,10 @@ async def process_booking(interaction: discord.Interaction, shift_type: str, slo
         if await cursor.fetchone():
             return await interaction.response.send_message("❌ Этот слот уже успел занять кто-то другой.", ephemeral=True)
 
+        # Записываем смену и фиксируем точное время создания
         await db.execute(
-            "INSERT INTO shifts (date, department, slot, user_id) VALUES (?, ?, ?, ?)",
-            (target_date_str, shift_type, slot_time, interaction.user.id)
+            "INSERT INTO shifts (date, department, slot, user_id, created_at) VALUES (?, ?, ?, ?, ?)",
+            (target_date_str, shift_type, slot_time, interaction.user.id, now_msk_str)
         )
         await db.commit()
 
@@ -177,7 +205,7 @@ class CuratorRemoveByIdModal(discord.ui.Modal, title="Принудительно
     async def on_submit(self, interaction: discord.Interaction):
         raw_id = self.user_input.value.strip()
         if not raw_id.isdigit():
-            return await interaction.response.send_message("❌ Неверный формат ID. Используйте только цифры.", ephemeral=True)
+            return await interaction.response.send_message("❌ Неверный формат ID.", ephemeral=True)
         
         target_id = int(raw_id)
         target_date_str = await fetch_date_by_msg(self.parent_message.id)
@@ -191,7 +219,7 @@ class CuratorRemoveByIdModal(discord.ui.Modal, title="Принудительно
             row = await cursor.fetchone()
             
             if not row:
-                return await interaction.response.send_message("❌ У данного сотрудника нет смены.", ephemeral=True)
+                return await interaction.response.send_message("❌ У данного сотрудника нет активных сменов.", ephemeral=True)
 
             user_slot = row[0]
             await db.execute(
@@ -202,7 +230,7 @@ class CuratorRemoveByIdModal(discord.ui.Modal, title="Принудительно
 
         embed, view = await get_shift_interface(self.shift_type, interaction.guild, target_date=t_date)
         await self.parent_message.edit(embed=embed, view=view)
-        await interaction.response.send_message(f"✅ Сотрудник <@{target_id}> принудительно снят со смены `{user_slot}`.", ephemeral=True)
+        await interaction.response.send_message(f"✅ Сотрудник <@{target_id}> снят со смены `{user_slot}`.", ephemeral=True)
 
 
 # ==================== МОДАЛКА КУРАТОРА: ВВОД ПОЛУЧАТЕЛЯ СМЕНЫ ====================
@@ -219,7 +247,7 @@ class CuratorTransferTargetModal(discord.ui.Modal, title="Назначение �
         to_raw = self.to_input.value.strip()
 
         if not to_raw.isdigit():
-            return await interaction.response.send_message("❌ Неверный формат ID. Поле должно содержать только цифры.", ephemeral=True)
+            return await interaction.response.send_message("❌ Неверный формат ID.", ephemeral=True)
         
         to_id = int(to_raw)
         target_date_str = await fetch_date_by_msg(self.parent_message.id)
@@ -233,39 +261,31 @@ class CuratorTransferTargetModal(discord.ui.Modal, title="Назначение �
         if not discord.utils.get(target_member.roles, id=required_role):
             return await interaction.response.send_message("❌ У нового сотрудника нет роли этого отдела.", ephemeral=True)
 
-        async with aiosqlite.connect(DB_NAME) as db:
-            # Проверяем, нет ли у получателя уже смены на этот день в этом отделе
-            cursor = await db.execute(
-                "SELECT 1 FROM shifts WHERE date = ? AND department = ? AND user_id = ?", 
-                (target_date_str, self.shift_type, to_id)
-            )
-            if await cursor.fetchone():
-                return await interaction.response.send_message("❌ У получателя смены уже есть активная смена на этот день.", ephemeral=True)
+        now_msk_str = get_moscow_now().strftime("%Y-%m-%d %H:%M:%S")
 
-            # Перезаписываем (или создаем новую) смену через INSERT OR REPLACE
-            # Для этого в нашей таблице нет UNIQUE полей, поэтому мы сначала удаляем старую запись на этот таймслот (если она была), а затем создаем новую
+        async with aiosqlite.connect(DB_NAME) as db:
+            # ИЗМЕНЕНИЕ: Для кураторской панели ПОЛНОСТЬЮ убраны ограничения по лимитам смен на человека
             await db.execute(
                 "DELETE FROM shifts WHERE date = ? AND department = ? AND slot = ?",
                 (target_date_str, self.shift_type, self.selected_slot)
             )
             await db.execute(
-                "INSERT INTO shifts (date, department, slot, user_id) VALUES (?, ?, ?, ?)",
-                (target_date_str, self.shift_type, self.selected_slot, to_id)
+                "INSERT INTO shifts (date, department, slot, user_id, created_at) VALUES (?, ?, ?, ?, ?)",
+                (target_date_str, self.shift_type, self.selected_slot, to_id, now_msk_str)
             )
             await db.commit()
 
         embed, view = await get_shift_interface(self.shift_type, interaction.guild, target_date=t_date)
         await self.parent_message.edit(embed=embed, view=view)
-        await interaction.response.send_message(f"✅ Смена `{self.selected_slot}` успешно передана/назначена сотруднику <@{to_id}>.", ephemeral=True)
+        await interaction.response.send_message(f"✅ Куратор успешно назначил смену `{self.selected_slot}` для <@{to_id}> (без ограничений лимитов).", ephemeral=True)
 
 
-# ==================== ИЗМЕНЕНИЕ: СПИСОК ВСЕХ СМЕН ДЛЯ КУРАТОРА ====================
+# ==================== СПИСОК ВСЕХ СМЕН ДЛЯ КУРАТОРА ====================
 class CuratorTransferSelect(discord.ui.Select):
     def __init__(self, shift_type: str, parent_message: discord.Message, occupied_dict: dict):
         options = []
         all_slots = CONFIG[shift_type]["slots"]
         
-        # Перебираем ВСЕ смены без исключения
         for slot in all_slots:
             if slot in occupied_dict:
                 user_id = occupied_dict[slot]
@@ -274,36 +294,23 @@ class CuratorTransferSelect(discord.ui.Select):
             else:
                 status = "Свободно"
                 
-            options.append(discord.SelectOption(
-                label=f"⏰ {slot}",
-                value=slot,
-                description=status
-            ))
+            options.append(discord.SelectOption(label=f"⏰ {slot}", value=slot, description=status))
 
         super().__init__(
             placeholder="🔄 Передача смены (выберите любую из списка)...",
-            min_values=1,
-            max_values=1,
-            options=options,
-            custom_id=f"p_curator_all_slots_select_{shift_type}",
-            row=0
+            min_values=1, max_values=1, options=options,
+            custom_id=f"p_curator_all_slots_select_{shift_type}", row=0
         )
         self.shift_type = shift_type
         self.parent_message = parent_message
 
     async def callback(self, interaction: discord.Interaction):
-        # При клике на абсолютно любую смену — запрашиваем ID нового владельца
         await interaction.response.send_modal(CuratorTransferTargetModal(self.shift_type, self.parent_message, self.values[0]))
 
 
-# ==================== ОБНОВЛЕННАЯ ПАНЕЛЬ КУРАТОРА ====================
 class CuratorActionView(discord.ui.View):
     def __init__(self, shift_type: str, parent_message: discord.Message, occupied_dict: dict):
         super().__init__(timeout=60)
-        self.shift_type = shift_type
-        self.parent_message = parent_message
-        
-        # Передаем словарь занятых смен, чтобы показать статусы прямо в списке
         self.add_item(CuratorTransferSelect(shift_type, parent_message, occupied_dict))
 
     @discord.ui.button(label="🚫 Принудительно снять сотрудника (по ID)", style=discord.ButtonStyle.danger, row=1)
@@ -311,14 +318,50 @@ class CuratorActionView(discord.ui.View):
         await interaction.response.send_modal(CuratorRemoveByIdModal(self.shift_type, self.parent_message))
 
 
-# ==================== МОДАЛКА ПЕРЕДАЧИ (ДЛЯ СОТРУДНИКОВ) ====================
+# ==================== ИЗМЕНЕНИЕ: ЭФЕМЕРНЫЙ СПИСОК ДЛЯ ОТМЕНЫ СМЕНЫ ====================
+class EphemeralCancelSelect(discord.ui.Select):
+    def __init__(self, shift_type: str, user_slots: list, target_date_str: str, main_message: discord.Message):
+        options = [discord.SelectOption(label=f"❌ Отменить смену: {slot}", value=slot) for slot in user_slots]
+        super().__init__(
+            placeholder="Какую из ваших смен вы хотите отменить?",
+            min_values=1, max_values=1, options=options
+        )
+        self.shift_type = shift_type
+        self.target_date_str = target_date_str
+        self.main_message = main_message
+
+    async def callback(self, interaction: discord.Interaction):
+        selected_slot = self.values[0]
+        t_date = datetime.strptime(self.target_date_str, "%Y-%m-%d").date()
+
+        async with aiosqlite.connect(DB_NAME) as db:
+            await db.execute(
+                "DELETE FROM shifts WHERE date = ? AND department = ? AND slot = ? AND user_id = ?", 
+                (self.target_date_str, self.shift_type, selected_slot, interaction.user.id)
+            )
+            await db.commit()
+
+        # Обновляем главное меню расписания
+        embed, view = await get_shift_interface(self.shift_type, interaction.guild, target_date=t_date)
+        await self.main_message.edit(embed=embed, view=view)
+        await interaction.response.edit_message(content=f"✅ Вы успешно отменили свою смену `{selected_slot}`.", view=None)
+
+
+class EphemeralCancelView(discord.ui.View):
+    def __init__(self, shift_type: str, user_slots: list, target_date_str: str, main_message: discord.Message):
+        super().__init__(timeout=60)
+        self.add_item(EphemeralCancelSelect(shift_type, user_slots, target_date_str, main_message))
+
+
+# ==================== МОДАЛКА ПЕРЕДАЧИ ДЛЯ СОТРУДНИКОВ (ЕСЛИ СМЕН НЕСКОЛЬКО) ====================
 class TransferModal(discord.ui.Modal, title="Передача смены"):
     target_input = discord.ui.TextInput(label="ID нового сотрудника", placeholder="Discord ID цифрами...", required=True, min_length=15, max_length=21)
 
-    def __init__(self, shift_type, current_slot):
+    def __init__(self, shift_type, current_slot, main_message):
         super().__init__()
         self.shift_type = shift_type
         self.current_slot = current_slot
+        self.main_message = main_message
 
     async def on_submit(self, interaction: discord.Interaction):
         raw_id = self.target_input.value.strip()
@@ -335,23 +378,52 @@ class TransferModal(discord.ui.Modal, title="Передача смены"):
         if not discord.utils.get(target_member.roles, id=required_role):
             return await interaction.response.send_message("❌ У сотрудника нет роли этого отдела.", ephemeral=True)
 
-        target_date_str = await fetch_date_by_msg(interaction.message.id)
+        target_date_str = await fetch_date_by_msg(self.main_message.id)
         t_date = datetime.strptime(target_date_str, "%Y-%m-%d").date()
 
         async with aiosqlite.connect(DB_NAME) as db:
-            cursor = await db.execute("SELECT 1 FROM shifts WHERE date = ? AND department = ? AND user_id = ?", (target_date_str, self.shift_type, target_id))
-            if await cursor.fetchone():
-                return await interaction.response.send_message("❌ У него уже есть смена на этот день.", ephemeral=True)
+            # Лимиты для принимающего сотрудника при обычной передаче
+            cursor = await db.execute("SELECT created_at FROM shifts WHERE date = ? AND department = ? AND user_id = ?", (target_date_str, self.shift_type, target_id))
+            target_shifts = await cursor.fetchall()
+            
+            if self.shift_type == "ad":
+                if len(target_shifts) >= 2:
+                    return await interaction.response.send_message("❌ У этого сотрудника уже лимит смен (2) на сегодня.", ephemeral=True)
+            else:
+                if len(target_shifts) >= 1:
+                    return await interaction.response.send_message("❌ У этого сотрудника уже есть активная смена на сегодня.", ephemeral=True)
 
-            await db.execute("UPDATE shifts SET user_id = ? WHERE date = ? AND department = ? AND slot = ?", (target_id, target_date_str, self.shift_type, self.current_slot))
+            now_msk_str = get_moscow_now().strftime("%Y-%m-%d %H:%M:%S")
+            await db.execute(
+                "UPDATE shifts SET user_id = ?, created_at = ? WHERE date = ? AND department = ? AND slot = ?", 
+                (target_id, now_msk_str, target_date_str, self.shift_type, self.current_slot)
+            )
             await db.commit()
 
         embed, view = await get_shift_interface(self.shift_type, interaction.guild, target_date=t_date)
-        await interaction.message.edit(embed=embed, view=view)
-        await interaction.response.send_message(f"✅ Смена передана сотруднику <@{target_id}>.", ephemeral=True)
+        await self.main_message.edit(embed=embed, view=view)
+        await interaction.response.send_message(f"✅ Ваша смена `{self.current_slot}` передана сотруднику <@{target_id}>.", ephemeral=True)
 
 
-# ==================== ГЛАВНЫЙ VIEW ====================
+# Выбор, какую именно из своих смен сотрудник хочет передать
+class EphemeralTransferSelect(discord.ui.Select):
+    def __init__(self, shift_type: str, user_slots: list, main_message: discord.Message):
+        options = [discord.SelectOption(label=f"🔄 Передать смену: {slot}", value=slot) for slot in user_slots]
+        super().__init__(placeholder="Какую из ваших смен вы хотите передать?", min_values=1, max_values=1, options=options)
+        self.shift_type = shift_type
+        self.main_message = main_message
+
+    async def callback(self, interaction: discord.Interaction):
+        await interaction.response.send_modal(TransferModal(self.shift_type, self.values[0], self.main_message))
+
+
+class EphemeralTransferView(discord.ui.View):
+    def __init__(self, shift_type: str, user_slots: list, main_message: discord.Message):
+        super().__init__(timeout=60)
+        self.add_item(EphemeralTransferSelect(shift_type, user_slots, main_message))
+
+
+# ==================== ГЛАВНЫЙ VIEW ПАНЕЛИ РАСПИСАНИЯ ====================
 class ShiftView(discord.ui.View):
     def __init__(self, shift_type: str, occupied_slots: dict = None, register_all: bool = False):
         super().__init__(timeout=None)
@@ -377,45 +449,53 @@ class ShiftView(discord.ui.View):
                 await interaction.response.send_message("❌ Доступ только для кураторов отдела.", ephemeral=True)
                 return False
             
-            # Собираем словарь занятых смен для вывода описаний в списке куратора
             async with aiosqlite.connect(DB_NAME) as db:
-                cursor = await db.execute(
-                    "SELECT slot, user_id FROM shifts WHERE date = ? AND department = ?", 
-                    (target_date_str, self.shift_type)
-                )
+                cursor = await db.execute("SELECT slot, user_id FROM shifts WHERE date = ? AND department = ?", (target_date_str, self.shift_type))
                 occupied_dict = {row[0]: row[1] for row in await cursor.fetchall()}
             
-            # Открываем панель
-            await interaction.response.send_message(
-                "🛠️ **Панель куратора:**", 
-                view=CuratorActionView(self.shift_type, interaction.message, occupied_dict), 
-                ephemeral=True
-            )
+            await interaction.response.send_message("🛠️ **Панель куратора:**", view=CuratorActionView(self.shift_type, interaction.message, occupied_dict), ephemeral=True)
             return False
 
         if "p_ctrl_cancel" in custom_id or "p_ctrl_transfer" in custom_id:
             async with aiosqlite.connect(DB_NAME) as db:
                 cursor = await db.execute("SELECT slot FROM shifts WHERE date = ? AND department = ? AND user_id = ?", (target_date_str, self.shift_type, interaction.user.id))
-                row = await cursor.fetchone()
+                rows = await cursor.fetchall()
 
-            if not row:
-                await interaction.response.send_message("❌ У вас нет активной смены в этом отделе на этот день.", ephemeral=True)
+            if not rows:
+                await interaction.response.send_message("❌ У вас нет активных смен в этом отделе на этот день.", ephemeral=True)
                 return False
 
-            user_slot = row[0]
+            user_slots = [row[0] for row in rows]
 
+            # ИЗМЕНЕНИЕ: Отмена смены через эфемерный выпадающий список
             if "p_ctrl_cancel" in custom_id:
-                async with aiosqlite.connect(DB_NAME) as db:
-                    await db.execute("DELETE FROM shifts WHERE date = ? AND department = ? AND slot = ?", (target_date_str, self.shift_type, user_slot))
-                    await db.commit()
-                
-                embed, view = await get_shift_interface(self.shift_type, interaction.guild, target_date=t_date)
-                await interaction.response.edit_message(embed=embed, view=view)
-                await interaction.followup.send(f"❌ Смена {user_slot} отменена.", ephemeral=True)
+                if len(user_slots) == 1:
+                    # Если смена всего одна — отменяем сразу без лишних меню для скорости
+                    async with aiosqlite.connect(DB_NAME) as db:
+                        await db.execute("DELETE FROM shifts WHERE date = ? AND department = ? AND slot = ?", (target_date_str, self.shift_type, user_slots[0]))
+                        await db.commit()
+                    embed, view = await get_shift_interface(self.shift_type, interaction.guild, target_date=t_date)
+                    await interaction.response.edit_message(embed=embed, view=view)
+                    await interaction.followup.send(f"❌ Смена `{user_slots[0]}` успешно отменена.", ephemeral=True)
+                else:
+                    # Если смен несколько — выкатываем эфемерный список выбора
+                    await interaction.response.send_message(
+                        "У вас несколько смен на этот день. Выберите, какую хотите отменить:",
+                        view=EphemeralCancelView(self.shift_type, user_slots, target_date_str, interaction.message),
+                        ephemeral=True
+                    )
                 return False
 
+            # Передача смены через эфемерный список (если их несколько)
             elif "p_ctrl_transfer" in custom_id:
-                await interaction.response.send_modal(TransferModal(self.shift_type, user_slot))
+                if len(user_slots) == 1:
+                    await interaction.response.send_modal(TransferModal(self.shift_type, user_slots[0], interaction.message))
+                else:
+                    await interaction.response.send_message(
+                        "У вас несколько смен. Выберите, какую именно вы хотите передать:",
+                        view=EphemeralTransferView(self.shift_type, user_slots, interaction.message),
+                        ephemeral=True
+                    )
                 return False
 
         return True
@@ -427,12 +507,14 @@ class ShiftCog(commands.Cog):
 
     async def cog_load(self):
         async with aiosqlite.connect(DB_NAME) as db:
+            # Создаем или модифицируем таблицу с поддержкой времени бронирования
             await db.execute("""
                 CREATE TABLE IF NOT EXISTS shifts (
                     date TEXT,
                     department TEXT,
                     slot TEXT,
-                    user_id INTEGER
+                    user_id INTEGER,
+                    created_at TEXT
                 )
             """)
             await db.execute("""
@@ -450,11 +532,7 @@ class ShiftCog(commands.Cog):
     @commands.command()
     async def director(self, ctx):
         current_date_str = get_moscow_date().strftime("%d.%m")
-        embed = discord.Embed(
-            title=f"📆 Расписание смен — {current_date_str}", 
-            description="Бронирование на воскресенье недоступно, день директора.", 
-            color=0xB26CFE
-        )
+        embed = discord.Embed(title=f"📆 Расписание смен — {current_date_str}", description="Бронирование на воскресенье недоступно, день директора.", color=0xB26CFE)
         await ctx.send(embed=embed)
 
     @commands.command()
@@ -467,10 +545,7 @@ class ShiftCog(commands.Cog):
         msg = await ctx.send(embed=embed, view=view)
         
         async with aiosqlite.connect(DB_NAME) as db:
-            await db.execute(
-                "INSERT OR REPLACE INTO panels (message_id, date, department) VALUES (?, ?, ?)",
-                (msg.id, str(target_date), shift_type)
-            )
+            await db.execute("INSERT OR REPLACE INTO panels (message_id, date, department) VALUES (?, ?, ?)", (msg.id, str(target_date), shift_type))
             await db.commit()
 
 
