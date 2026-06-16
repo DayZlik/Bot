@@ -9,8 +9,9 @@ CONFIG = {
         "role_id": 101010101010101010,        
         "curator_role_ids": [111222333444555, 222333444555666],   
         "slots": ["07:00", "15:00", "23:00"],
-        "channel_id": 1111222233334444,     # Укажите ID канала для отдела BM
-        "auto_start": True                  # Включить автоотправку в 19:00? (True - да, False - нет)
+        "channel_id": 1111222233334444,     # ID канала для отдела BM
+        "auto_start": True,                  # Включить автоотправку в 19:00?
+        "mention_text": "<@&101010101010101010> **Открыта запись на смены для отдела BM!**" # Текст/пинг над эмбедом
     },    
     "ad": {
         "role_id": 888888888888888888,        
@@ -20,8 +21,9 @@ CONFIG = {
             "17:00 - 17:59", "18:00 - 18:59", "19:00 - 19:59", "20:00 - 20:59",
             "21:00 - 21:59", "22:00 - 22:59", "23:00 - 23:59", "00:00 - 00:59"
         ],
-        "channel_id": 5555666677778888,     # Укажите ID канала для отдела ad
-        "auto_start": True                  
+        "channel_id": 5555666677778888,     # ID канала для отдела ad
+        "auto_start": True,                  
+        "mention_text": "<@&888888888888888888> **Новая панель дежурств ad готова к заполнению!**" # Текст/пинг над эмбедом
     },    
     "24ad": {
         "role_id": 888888888888888888,        
@@ -34,8 +36,9 @@ CONFIG = {
             "16:00 - 16:59", "17:00 - 17:59", "18:00 - 18:59", "19:00 - 19:59",
             "20:00 - 20:59", "21:00 - 21:59", "22:00 - 22:59", "23:00 - 23:59"
         ],
-        "channel_id": 9999888877776666,     # Укажите ID канала для отдела 24ad
-        "auto_start": True                  
+        "channel_id": 9999888877776666,     # ID канала для отдела 24ad
+        "auto_start": True,                  
+        "mention_text": "<@&888888888888888888> **Внимание! Доступна запись на смены 24ad.**" # Текст/пинг над эмбедом
     }
 }
 DB_NAME = "shifts.db"                         
@@ -75,7 +78,6 @@ async def get_shift_interface(db, shift_type: str, target_date=None):
         title_text = f"📅 Расписание смен — Отдел BM — {current_date_str}"
         color_val = 0x3498DB
 
-    # ИСПРАВЛЕНИЕ 1: Для воскресенья возвращаем None вместо View, чтобы полностью скрыть кнопки
     if shift_type == "24ad" and target_date.weekday() == 6:
         title_text = f"📆 Расписание смен — {current_date_str}"
         embed = discord.Embed(title=title_text, description="🔒 **Бронирование на воскресенье недоступно, день директора.**", color=0xB26CFE)
@@ -462,7 +464,6 @@ class ShiftView(discord.ui.View):
             rows = await cursor.fetchall()
 
             if not rows:
-                # ИСПРАВЛЕНИЕ 2: Исправлена опечатка (activeных -> активных)
                 await interaction.response.send_message("❌ У вас нет активных смен в этом отделе на этот день.", ephemeral=True)
                 return False
 
@@ -489,7 +490,7 @@ class ShiftView(discord.ui.View):
                 else:
                     await interaction.response.send_message(
                         "У вас несколько смен. Выберите, какую именно вы хотите передать:",
-                        view=EphemeralTransferView(self.shift_type, user_slots, interaction.message),
+                        view=EphemeralTransferView(self.shift_type, interaction.message),
                         ephemeral=True
                     )
                 return False
@@ -503,7 +504,6 @@ class ShiftCog(commands.Cog):
         self.bot = bot
 
     async def cog_load(self):
-        # ИСПРАВЛЕНИЕ 3: Создаем единое постоянное подключение к БД на уровне бота
         self.bot.db = await aiosqlite.connect(DB_NAME)
         db = self.bot.db
 
@@ -532,7 +532,6 @@ class ShiftCog(commands.Cog):
 
     async def cog_unload(self):
         self.auto_shift_panels.cancel()
-        # Закрываем глобальное подключение при выгрузке кога
         if hasattr(self.bot, "db") and self.bot.db:
             await self.bot.db.close()
 
@@ -575,8 +574,11 @@ class ShiftCog(commands.Cog):
                     pass
 
             # --- ШАГ 2: Отправка новой панели на завтра ---
+            mention_text = data.get("mention_text", "") # Получаем строчку для тега
             embed, view = await get_shift_interface(db, dept, target_date=tomorrow)
-            new_msg = await channel.send(embed=embed, view=view)
+            
+            # Отправляем текст с пингом и эмбед вместе
+            new_msg = await channel.send(content=mention_text, embed=embed, view=view)
 
             # --- ШАГ 3: Запись новой панели в базу данных ---
             await db.execute(
@@ -593,7 +595,8 @@ class ShiftCog(commands.Cog):
         db = self.bot.db
         embed, view = await get_shift_interface(db, shift_type, target_date=target_date)
         
-        msg = await ctx.send(embed=embed, view=view)
+        mention_text = CONFIG[shift_type].get("mention_text", "") # Получаем строчку для тега
+        msg = await ctx.send(content=mention_text, embed=embed, view=view)
         
         await db.execute("INSERT OR REPLACE INTO panels (message_id, date, department) VALUES (?, ?, ?)", (msg.id, str(target_date), shift_type))
         await db.commit()
