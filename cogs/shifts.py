@@ -10,24 +10,24 @@ CONFIG = {
         "curator_role_ids": [111222333444555, 222333444555666],   
         "slots": ["07:00", "15:00", "23:00"],
         "channel_id": 1111222233334444,     # ID канала для отдела BM
-        "auto_start": False,                  # Включить автоотправку в 19:00?
+        "auto_start": True,                  # Включить автоотправку в 19:00?
         "mention_text": "<@&101010101010101010> **Открыта запись на смены для отдела BM!**" 
     },    
     "ad": {
-        "role_id": 1430913711979233312,        
-        "curator_role_ids": [1446784416352440493],   
+        "role_id": 888888888888888888,        
+        "curator_role_ids": [555666777888999],   
         "slots": [
             "13:00 - 13:59", "14:00 - 14:59", "15:00 - 15:59", "16:00 - 16:59",
             "17:00 - 17:59", "18:00 - 18:59", "19:00 - 19:59", "20:00 - 20:59",
             "21:00 - 21:59", "22:00 - 22:59", "23:00 - 23:59", "00:00 - 00:59"
         ],
         "channel_id": 5555666677778888,     # ID канала для отдела ad
-        "auto_start": False,                  
-        "mention_text": "<@&1430913711979233312>" 
+        "auto_start": True,                  
+        "mention_text": "<@&888888888888888888> **Новая панель дежурств ad готова к заполнению!**" 
     },    
     "24ad": {
-        "role_id": 1430913711979233312,        
-        "curator_role_ids": [1446784416352440493],   
+        "role_id": 888888888888888888,        
+        "curator_role_ids": [555666777888999],   
         "slots": [
             "00:00 - 00:59", "01:00 - 01:59", "02:00 - 02:59", "03:00 - 03:59",
             "04:00 - 04:59", "05:00 - 05:59", "06:00 - 06:59", "07:00 - 07:59",
@@ -37,8 +37,8 @@ CONFIG = {
             "20:00 - 20:59", "21:00 - 21:59", "22:00 - 22:59", "23:00 - 23:59"
         ],
         "channel_id": 9999888877776666,     # ID канала для отдела 24ad
-        "auto_start": False,                  
-        "mention_text": "<@&1430913711979233312>" 
+        "auto_start": True,                  
+        "mention_text": "<@&888888888888888888> **Внимание! Доступна запись на смены 24ad.**" 
     }
 }
 DB_NAME = "shifts.db"                         
@@ -356,27 +356,7 @@ class EphemeralCancelView(discord.ui.View):
         self.add_item(EphemeralCancelSelect(shift_type, user_slots, target_date_str, main_message))
 
 
-# ==================== ИСПРАВЛЕНИЕ БАГА: ПЕРЕДАЧА СМЕНЫ ДЛЯ ТЕХ, У КОГО ИХ МНОГО ====================
-
-# Кнопка-триггер, которая появляется ПОСЛЕ выбора смены из выпадающего списка
-class TransferTriggerButton(discord.ui.Button):
-    def __init__(self, shift_type: str, slot: str, main_message: discord.Message):
-        super().__init__(style=discord.ButtonStyle.green, label="📝 Ввести ID сотрудника")
-        self.shift_type = shift_type
-        self.slot = slot
-        self.main_message = main_message
-
-    async def callback(self, interaction: discord.Interaction):
-        # Открываем модальное окно БЕЗОПАСНО от клика по кнопке
-        await interaction.response.send_modal(TransferModal(self.shift_type, self.slot, self.main_message))
-
-
-class EphemeralTransferButtonView(discord.ui.View):
-    def __init__(self, shift_type: str, slot: str, main_message: discord.Message):
-        super().__init__(timeout=60)
-        self.add_item(TransferTriggerButton(shift_type, slot, main_message))
-
-
+# ==================== ИСПРАВЛЕННО: МГНОВЕННЫЙ ВЫЗОВ МОДАЛКИ ИЗ СПИСКА ПЕРЕДАЧИ ====================
 class EphemeralTransferSelect(discord.ui.Select):
     def __init__(self, shift_type: str, user_slots: list, main_message: discord.Message):
         options = [discord.SelectOption(label=f"🔄 Передать смену: {slot}", value=slot) for slot in user_slots]
@@ -386,12 +366,8 @@ class EphemeralTransferSelect(discord.ui.Select):
 
     async def callback(self, interaction: discord.Interaction):
         selected_slot = self.values[0]
-        # Вместо прямого вызова модалки (что ломает Дискорд), превращаем меню в кнопку ввода ID
-        view = EphemeralTransferButtonView(self.shift_type, selected_slot, self.main_message)
-        await interaction.response.edit_message(
-            content=f"Вы выбрали смену `{selected_slot}`.\nНажмите кнопку ниже, чтобы указать, кому её передать:",
-            view=view
-        )
+        # Прямо отсюда сразу же отправляем модальное окно без промежуточных кнопок!
+        await interaction.response.send_modal(TransferModal(self.shift_type, selected_slot, self.main_message))
 
 
 class EphemeralTransferView(discord.ui.View):
@@ -446,21 +422,20 @@ class TransferModal(discord.ui.Modal, title="Передача смены"):
         )
         await db.commit()
 
-        # Обновляем эмбед на главной панели
+        # Шаг 1. Обновляем главный эмбед расписания
         embed, view = await get_shift_interface(db, self.shift_type, target_date=t_date)
         await self.main_message.edit(embed=embed, view=view)
 
-        # Если модалка вызвана из эфемерного подменю (когда было много смен)
-        if interaction.message and interaction.message.id != self.main_message.id:
-            try:
-                # Очищаем кнопку из эфемерного сообщения, чтобы не кликали повторно
-                await interaction.message.edit(content=f"✅ Смена `{self.current_slot}` успешно передана сотруднику <@{target_id}>.", view=None)
-            except Exception:
-                pass
-            # Обязательно отвечаем на сабмит модалки
-            await interaction.response.send_message("✅ Операция успешно завершена.", ephemeral=True)
+        # Шаг 2. Закрываем и зачищаем вызвавший интерфейс
+        if interaction.message.id != self.main_message.id:
+            # Если модалка открылась из выпадающего списка (смен было несколько)
+            # edit_message очистит само всплывающее меню выбора, чтобы избежать повторных нажатий
+            await interaction.response.edit_message(
+                content=f"✅ Смена `{self.current_slot}` успешно передана сотруднику <@{target_id}>.", 
+                view=None
+            )
         else:
-            # Если вызвана напрямую с кнопки панели (когда смена была всего одна)
+            # Если модалка открылась прямо с кнопки панели (смена была одна)
             await interaction.response.send_message(f"✅ Ваша смена `{self.current_slot}` передана сотруднику <@{target_id}>.", ephemeral=True)
 
 
@@ -525,12 +500,11 @@ class ShiftView(discord.ui.View):
                 return False
 
             elif "p_ctrl_transfer" in custom_id:
-                # ИСПРАВЛЕННАЯ ЛОГИКА:
                 if len(user_slots) == 1:
-                    # Если одна смена — сразу открываем модалку ввода ID (работает безотказно)
+                    # Если одна смена — сразу открываем модалку ввода ID
                     await interaction.response.send_modal(TransferModal(self.shift_type, user_slots[0], interaction.message))
                 else:
-                    # Если смен несколько — выводим красивое эфемерное меню выбора смены
+                    # Если смен несколько — выводим список выбора смены
                     await interaction.response.send_message(
                         "У вас несколько смен. Выберите, какую именно вы хотите передать:",
                         view=EphemeralTransferView(self.shift_type, user_slots, interaction.message),
